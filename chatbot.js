@@ -16,6 +16,21 @@
       <p class="gs-note">Sin envíos automáticos. Tú confirmas en WhatsApp.</p>
     </section>`;
   document.body.append(root);
+
+  const gsTypingStyle = document.createElement('style');
+  gsTypingStyle.textContent = `
+    #gs-chat .gs-typing { display:flex; align-items:center; gap:5px; width:fit-content; min-height:18px; }
+    #gs-chat .gs-typing span { width:7px; height:7px; border-radius:50%; background:#8492a6; animation:gsTypingDots 1.2s infinite ease-in-out; }
+    #gs-chat .gs-typing span:nth-child(2) { animation-delay:.2s; }
+    #gs-chat .gs-typing span:nth-child(3) { animation-delay:.4s; }
+    @keyframes gsTypingDots { 0%,60%,100% { opacity:.35; transform:translateY(0); } 30% { opacity:1; transform:translateY(-5px); } }
+    #gs-chat .gs-bot:not(.gs-typing) { animation:gsMessageAppear .22s ease-out both; }
+    @keyframes gsMessageAppear { from { opacity:0; transform:translateY(7px); } to { opacity:1; transform:translateY(0); } }
+    #gs-chat button:disabled { cursor:wait; opacity:.6; }
+    @media(prefers-reduced-motion:reduce) { #gs-chat .gs-typing span,#gs-chat .gs-bot { animation:none!important; } }
+  `;
+  document.head.appendChild(gsTypingStyle);
+
   const panel = root.querySelector('.gs-panel');
   const launch = root.querySelector('.gs-launch');
   const log = root.querySelector('.gs-log');
@@ -26,21 +41,65 @@
   let quote = {};
   const normalize = s => s.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
   const scroll = () => { log.scrollTop = log.scrollHeight; };
-  const message = (text, user = false) => {
+  let renderVersion = 0;
+  let replyQueue = Promise.resolve();
+  let pendingReplies = 0;
+  let restoreInputFocus = false;
+  const setReplyBusy = busy => {
+    if (busy && document.activeElement === input) restoreInputFocus = true;
+    input.disabled = busy;
+    root.querySelector('.gs-form button[type="submit"]').disabled = busy;
+    root.querySelector('[data-tool="menu"]').disabled = busy;
+    actions.style.display = busy ? 'none' : '';
+    if (!busy) {
+      requestAnimationFrame(scroll);
+      if (restoreInputFocus && !panel.hidden && document.activeElement === document.body) input.focus({preventScroll:true});
+      restoreInputFocus = false;
+    }
+  };
+  const appendMessage = (text, user = false) => {
     const el = document.createElement('p');
     el.className = user ? 'gs-msg gs-user' : 'gs-msg gs-bot';
     el.textContent = text;
     log.append(el);
-    // Keep the widget lightweight during long sessions.
     while (log.children.length > 60) log.firstElementChild.remove();
     scroll();
+  };
+  const showTyping = () => {
+    const el = document.createElement('p');
+    el.className = 'gs-msg gs-bot gs-typing';
+    el.setAttribute('role', 'status');
+    el.setAttribute('aria-label', 'El asistente está escribiendo');
+    el.innerHTML = '<span aria-hidden="true"></span><span aria-hidden="true"></span><span aria-hidden="true"></span>';
+    log.append(el); scroll(); return el;
+  };
+  const message = (text, user = false) => {
+    if (user) { appendMessage(text, true); return; }
+    const version = renderVersion;
+    pendingReplies++;
+    setReplyBusy(true);
+    replyQueue = replyQueue.then(async () => {
+      if (version !== renderVersion) return;
+      const indicator = showTyping();
+      const delay = Math.min(850, Math.max(320, text.length * 3));
+      await new Promise(resolve => setTimeout(resolve, delay));
+      indicator.remove();
+      if (version !== renderVersion) return;
+      appendMessage(text);
+    }).catch(error => {
+      console.error('Error de animación:', error);
+    }).finally(() => {
+      if (version !== renderVersion) return;
+      pendingReplies = Math.max(0, pendingReplies - 1);
+      if (pendingReplies === 0) setReplyBusy(false);
+    });
   };
   const choices = items => {
     actions.replaceChildren();
     items.forEach(([label, callback]) => {
       const b = document.createElement('button');
       b.type = 'button'; b.textContent = label;
-      b.addEventListener('click', () => { message(label, true); callback(); });
+      b.addEventListener('click', () => { if (pendingReplies) return; message(label, true); callback(); });
       actions.append(b);
     });
     // Options change the log height; scroll after the browser applies that layout.
@@ -57,6 +116,12 @@
   const business = {
     name: 'GScode', phone: PHONE, location: 'Acapulco, Guerrero',
     website: null, hours: null, email: null
+  };
+  let phraseIndex = 0;
+  const naturalReply = options => {
+    const result = options[phraseIndex % options.length];
+    phraseIndex++;
+    return result;
   };
   const greeting = '¡Hola! 👋 Bienvenido a GScode. Soy tu asistente virtual. ¿En qué puedo ayudarte hoy?';
   const homeChoices = () => choices([
@@ -201,7 +266,7 @@
     message(clean, true); const t = normalize(clean);
     // Global requests are handled before fields, so questions never become a name or a symptom.
     if (/^(cancelar|cancela|menu|inicio|empezar de nuevo|reiniciar)[.! ]*$/.test(t)) { home(); return; }
-    if (/^(gracias|muchas gracias|no gracias|eso es todo)[.! ]*$/.test(t)) { message('Con gusto. Si necesitas algo más, aquí puedes consultarlo.'); if (stage) choices([['Continuar mi solicitud',resume],['Terminar',home]]); else homeChoices(); return; }
+    if (/^(gracias|muchas gracias|no gracias|eso es todo)[.! ]*$/.test(t)) { message(naturalReply(['¡Con gusto! 😊 Aquí sigo por si necesitas algo más.', '¡Perfecto! Si te surge otra duda, escríbeme.', '¡Gracias por escribirnos! Que tengas un excelente día.'])); if (stage) choices([['Continuar mi solicitud',resume],['Terminar',home]]); else homeChoices(); return; }
     if (/^(hola|buenos dias|buenas tardes|buenas noches|buenas)[.! ]*$/.test(t)) { message('¡Hola! Con gusto te ayudo.'); if (stage) resume(); else homeChoices(); return; }
     if (/whatsapp|hablar (con|a)|asesor|atencion (personal|humana)|\bhumano\b|telefono|contactar/.test(t)) { contact(); return; }
     if (/eres (un robot|una persona|humano|ia)|quien eres|inteligencia artificial/.test(t)) { answer('identity'); return; }
@@ -232,10 +297,15 @@
     if (e.key === 'Escape' && !panel.hidden) { e.preventDefault(); setOpen(false); }
   });
   root.querySelector('form').addEventListener('submit', e => {
-    e.preventDefault(); const text = input.value.slice(0,input.maxLength); input.value = ''; submitText(text);
+    e.preventDefault(); if (pendingReplies) return; const text = input.value.slice(0,input.maxLength); input.value = ''; submitText(text);
   });
   root.querySelector('[data-tool="menu"]').addEventListener('click', home);
   const reset = () => {
+    renderVersion++;
+    replyQueue = Promise.resolve();
+    pendingReplies = 0;
+    restoreInputFocus = false;
+    setReplyBusy(false);
     log.replaceChildren(); stage = null; quote = {}; input.value = ''; input.maxLength = 1000; input.placeholder = 'Escribe tu pregunta…';
     message(greeting); homeChoices();
   };
